@@ -21,6 +21,7 @@ export class NodeMapService {
             pm25: node.pm25,
             pm10: node.pm10,
             reward: node.reward,
+            lastUpdate:node.lastSeen
         }));
     }
  async getNearbyNodes(lat: number, lng: number, radius = 5000) {
