@@ -19,11 +19,55 @@ app.use(helmet());
 // ---------------------------------------------------------------------------
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        process.env.CLIENT_URL,
+        "http://localhost:5173",
+      ].filter(Boolean) as string[];
+
+      // Allow requests without origin
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      // Allow exact origins
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      // Allow *.breezonetwork.xyz
+      const isBreezeNetwork =
+        /^https?:\/\/([a-zA-Z0-9-]+\.)*breezonetwork\.xyz$/.test(origin);
+
+      // Allow *.vercel.app
+      const isVercel =
+        /^https?:\/\/([a-zA-Z0-9-]+\.)*vercel\.app$/.test(origin);
+
+      if (isBreezeNetwork || isVercel) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
+
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ],
+
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+    ],
   })
 );
+
 
 // ---------------------------------------------------------------------------
 // Global rate limiting

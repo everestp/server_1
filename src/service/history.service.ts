@@ -1,7 +1,6 @@
 import { HistoryRepository } from "../repositories/history.repository";
 import { getAQIInfo } from "../utils/aqi.utils";
 
-
 export class HistoryService {
   private historyRepository: HistoryRepository;
 
@@ -9,59 +8,45 @@ export class HistoryService {
     this.historyRepository = new HistoryRepository();
   }
 
- async getWeeklyHistory(nodeId: string) {
-  const rows =
-    await this.historyRepository.getWeeklyHistory(nodeId);
+  async getWeeklyHistory(nodeId: string) {
+    const rows = await this.historyRepository.getWeeklyHistory(nodeId);
 
-  const map = new Map();
-
-  // convert DB data → map
-  rows.forEach((item: any) => {
-    const date = new Date(
-      item._id.year,
-      item._id.month - 1,
-      item._id.day
-    );
-
-    const key = date.toISOString().split("T")[0];
-
-    map.set(key, item);
-  });
-
-  const result = [];
-
-  // ALWAYS last 7 days from TODAY
-  for (let i = 6; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-
-    const key = date.toISOString().split("T")[0];
-
-    const data = map.get(key);
-
-    const aqi = Math.round(data?.avgAQI ?? 0);
-
-    result.push({
-      label: date.toLocaleDateString("en-US", {
-        weekday: "short",
-      }),
-
-      fullLabel: date.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-      }),
-
-      aqi,
-      pm25: data?.avgPM25 ?? 0,
-      pm10: data?.avgPM10 ?? 0,
-      temperature: data?.avgTemp ?? 0,
-      humidity: data?.avgHumidity ?? 0,
-      mq135: data?.avgMQ135 ?? 0,
-
-      info: getAQIInfo(aqi),
+    // Map database results to a quick-lookup object
+    const dataMap = new Map();
+    rows.forEach((row: any) => {
+      dataMap.set(row.dateKey, row.averages);
     });
-  }
 
-  return result;
-}
+    const result = [];
+
+    // Loop through the last 7 days ending with TODAY
+    for (let i = 6; i >= 0; i--) {
+      const targetDate = new Date();
+      targetDate.setDate(targetDate.getDate() - i);
+
+      const key = targetDate.toISOString().split("T")[0]; // YYYY-MM-DD
+      const dailyData = dataMap.get(key);
+
+      // Round the average AQI for display
+      const aqi = Math.round(dailyData?.aqi ?? 0);
+
+      result.push({
+        label: targetDate.toLocaleDateString("en-US", {
+          weekday: "short", // e.g., "Mon"
+        }),
+        fullLabel: targetDate.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric", // e.g., "May 11"
+        }),
+        aqi,
+        pm25: Number((dailyData?.pm25 ?? 0).toFixed(2)),
+        pm10: Number((dailyData?.pm10 ?? 0).toFixed(2)),
+        temperature: Number((dailyData?.temperature ?? 0).toFixed(1)),
+        humidity: Number((dailyData?.humidity ?? 0).toFixed(1)),
+        info: getAQIInfo(aqi),
+      });
+    }
+
+    return result;
+  }
 }

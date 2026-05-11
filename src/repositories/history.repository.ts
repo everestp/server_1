@@ -1,43 +1,65 @@
 import { SensorHistory } from "../models/sensorhistory.model";
-// import { getAQIInfo } from "../utils/aqi.utils";
 
 export class HistoryRepository {
   /**
-   * LAST 7 DAYS AQI HISTORY
+   * Aggregates sensor data to get daily averages for the last 7 days
    */
-async getWeeklyHistory(nodeId: string) {
-  const today = new Date();
+  async getWeeklyHistory(nodeId: string) {
+    const today = new Date();
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(today.getDate() - 6);
+    sevenDaysAgo.setHours(0, 0, 0, 0); // Start from the beginning of the day
 
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(today.getDate() - 6);
-
-  const rawData = await SensorHistory.aggregate([
-    {
-      $match: {
-        nodeId,
-        createdAt: {
-          $gte: sevenDaysAgo,
-          $lte: today,
+    return await SensorHistory.aggregate([
+      {
+        $match: {
+          nodeId,
+          timestamp: {
+            $gte: sevenDaysAgo,
+            $lte: today,
+          },
         },
       },
-    },
-    {
-      $group: {
-        _id: {
-          year: { $year: "$createdAt" },
-          month: { $month: "$createdAt" },
-          day: { $dayOfMonth: "$createdAt" },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$timestamp" },
+            month: { $month: "$timestamp" },
+            day: { $dayOfMonth: "$timestamp" },
+          },
+          // Calculate the average for each metric
+          avgAQI: { $avg: "$aqi" },
+          avgPM25: { $avg: "$pm25" },
+          avgPM10: { $avg: "$pm10" },
+          avgTemp: { $avg: "$temperature" },
+          avgHumidity: { $avg: "$humidity" },
         },
-        avgAQI: { $avg: "$aqi" },
-        avgPM25: { $avg: "$pm25" },
-        avgPM10: { $avg: "$pm10" },
-        avgTemp: { $avg: "$temperature" },
-        avgHumidity: { $avg: "$humidity" },
-        avgMQ135: { $avg: "$mq135" },
       },
-    },
-  ]);
-
-  return rawData;
-}
+      {
+        $project: {
+          _id: 0,
+          dateKey: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: {
+                $dateFromParts: {
+                  year: "$_id.year",
+                  month: "$_id.month",
+                  day: "$_id.day",
+                },
+              }
+            }
+          },
+          averages: {
+            aqi: "$avgAQI",
+            pm25: "$avgPM25",
+            pm10: "$avgPM10",
+            temperature: "$avgTemp",
+            humidity: "$avgHumidity"
+          }
+        },
+      },
+      { $sort: { dateKey: 1 } }
+    ]);
+  }
 }

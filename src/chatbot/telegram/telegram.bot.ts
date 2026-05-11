@@ -5,13 +5,7 @@ import logger from "../../config/logger.config";
 import { serverConfig } from "../../config";
 import { IUserNotifier } from "../../service/payment.poller.service";
 
-/**
- * TelegramBot
- *
- * Wires together the grammY bot framework with TelegramService.
- * All business logic lives in TelegramService — this file is purely
- * the adapter layer between Telegram events and the service.
- */
+
 export class TelegramBot implements IUserNotifier {
   private readonly bot: Bot<BotContext>;
 
@@ -20,75 +14,149 @@ export class TelegramBot implements IUserNotifier {
     if (!token) throw new Error("Missing TELEGRAM_BOT_TOKEN env variable");
 
     this.bot = new Bot<BotContext>(token);
+
     this.registerMiddleware();
     this.registerHandlers();
   }
 
-  // ─── Middleware ─────────────────────────────────────────────────────────────
+  // ───────────────── Middleware ─────────────────
 
   private registerMiddleware(): void {
-    // In-memory session (swap to a DB adapter for multi-instance deployments)
     this.bot.use(
       session<SessionData, BotContext>({
-        initial: () => ({ awaitingLocation: false, locationAsked: false }),
+        initial: () => ({
+          awaitingLocation: false,
+          locationAsked: false,
+        }),
       })
     );
 
-    // Global error boundary
     this.bot.catch((err) => {
-      logger.error("Unhandled bot error", { error: err.error, ctx: err.ctx?.update });
+      logger.error("Bot error", { error: err.error });
     });
   }
 
-  // ─── Handlers ───────────────────────────────────────────────────────────────
+  // ───────────────── Handlers ─────────────────
 
   private registerHandlers(): void {
     this.bot.command("start", (ctx) => this.onStart(ctx));
+    this.bot.command("help", (ctx) => this.onHelp(ctx));
+    this.bot.command("node", (ctx) => this.onNode(ctx));
+    this.bot.command("location", (ctx) => this.onLocationCommand(ctx));
+
     this.bot.on("message:location", (ctx) => this.onLocation(ctx));
     this.bot.on("message:text", (ctx) => this.onText(ctx));
   }
 
-  // ─── /start ─────────────────────────────────────────────────────────────────
+  // ───────────────── Helpers ─────────────────
+
+  private locationKeyboard() {
+    return {
+      keyboard: [
+        [{ text: "📍 Share My Location", request_location: true }],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    };
+  }
+
+  private async showLocationPrompt(ctx: BotContext, message: string) {
+    await ctx.reply(message, {
+      reply_markup: this.locationKeyboard(),
+    });
+  }
+
+  // ───────────────── /start ─────────────────
 
   private async onStart(ctx: BotContext): Promise<void> {
     const telegramId = String(ctx.from?.id);
     const username = ctx.from?.username;
 
-    const { text, askLocation } = await this.telegramService.handleStart(telegramId, username);
+    const { text, askLocation } = await this.telegramService.handleStart(
+      telegramId,
+      username
+    );
 
-    await ctx.reply(text, { parse_mode: "Markdown" });
+    await ctx.reply(
+      `${text}\n\nUse /help to see available commands.`,
+      { parse_mode: "Markdown" }
+    );
 
     if (askLocation && !ctx.session.locationAsked) {
-      ctx.session.awaitingLocation = true;
       ctx.session.locationAsked = true;
+      ctx.session.awaitingLocation = true;
 
-      await ctx.reply("📍 Please share your location:", {
-        reply_markup: {
-          keyboard: [
-            [
-              {
-                text: "📍 Share My Location",
-                request_location: true,
-              },
-            ],
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: true,
-        },
-      });
+      await this.showLocationPrompt(
+        ctx,
+        "📍 Please share your location to continue:"
+      );
     }
   }
 
-  // ─── Location message ────────────────────────────────────────────────────────
+  // ───────────────── /help ─────────────────
+
+  private async onHelp(ctx: BotContext): Promise<void> {
+    await ctx.reply(
+      `📌 *Available Commands*\n\n` +
+        `/start - Start bot\n` +
+        `/help - Show commands\n` +
+        `/node - Show available nodes\n` +
+        `/location - Share or update location`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  // ───────────────── /node ─────────────────
+
+  private async onNode(ctx: BotContext): Promise<void> {
+    const telegramId = String(ctx.from?.id);
+
+    const nodes = await this.telegramService.getAvailableNodes?.(telegramId);
+
+    if (!nodes || nodes.length === 0) {
+      await ctx.reply("⚠️ No nodes available right now.");
+      return;
+    }
+
+    const text =
+      "📡 *Available Nodes*\n\n" +
+      nodes.map((n: any, i: number) => `• Node ${i + 1}: ${n.name || "Active"}`).join("\n");
+
+    await ctx.reply(text, { parse_mode: "Markdown" });
+  }
+
+  // ───────────────── /location ─────────────────
+
+  private async onLocationCommand(ctx: BotContext): Promise<void> {
+    const telegramId = String(ctx.from?.id);
+
+    const hasLocation = await this.telegramService.hasLocation?.(telegramId);
+
+    if (!hasLocation) {
+      ctx.session.awaitingLocation = true;
+      await this.showLocationPrompt(
+        ctx,
+        "📍 Please share your location:"
+      );
+    } else {
+      await ctx.reply("📍 Your location is already saved. You can update it anytime by sharing again.");
+      await this.showLocationPrompt(ctx, "Want to update it? Share again below 👇");
+    }
+  }
+
+  // ───────────────── Location message ─────────────────
 
   private async onLocation(ctx: BotContext): Promise<void> {
     const location = ctx.message?.location;
     if (!location) return;
 
     const telegramId = String(ctx.from?.id);
-    const { latitude: lat, longitude: lng } = location;
 
-    const reply = await this.telegramService.saveLocation(telegramId, lat, lng);
+    const reply = await this.telegramService.saveLocation(
+      telegramId,
+      location.latitude,
+      location.longitude
+    );
 
     ctx.session.awaitingLocation = false;
 
@@ -98,19 +166,20 @@ export class TelegramBot implements IUserNotifier {
     });
   }
 
-  // ─── Text messages ───────────────────────────────────────────────────────────
+  // ───────────────── Text handler ─────────────────
 
   private async onText(ctx: BotContext): Promise<void> {
     const telegramId = String(ctx.from?.id);
     const text = ctx.message?.text ?? "";
 
-    // Ignore bot commands that fall through
     if (text.startsWith("/")) return;
 
-    // Show typing indicator while processing
     await ctx.replyWithChatAction("typing");
 
-    const result = await this.telegramService.handleUserMessage(telegramId, text);
+    const result = await this.telegramService.handleUserMessage(
+      telegramId,
+      text
+    );
 
     switch (result.type) {
       case "answer":
@@ -122,54 +191,42 @@ export class TelegramBot implements IUserNotifier {
         await ctx.reply(result.text!, { parse_mode: "Markdown" });
 
         if (result.qrBuffer) {
-          await ctx.replyWithPhoto(new InputFile(result.qrBuffer, "payment_qr.png"), {
-            caption:
-              `💳 Scan with Phantom / Solflare\n` +
-              `Memo (keep this): \`${result.paymentId}\``,
-            parse_mode: "Markdown",
-          });
+          await ctx.replyWithPhoto(
+            new InputFile(result.qrBuffer, "payment_qr.png"),
+            {
+              caption: `💳 Scan to pay\nMemo: \`${result.paymentId}\``,
+              parse_mode: "Markdown",
+            }
+          );
         }
 
-        // Prompt location sharing button if location is still missing
         if (result.text?.includes("location")) {
           ctx.session.awaitingLocation = true;
-          await ctx.reply("📍 Share your location to continue:", {
-            reply_markup: {
-              keyboard: [[{ text: "📍 Share My Location", request_location: true }]],
-              resize_keyboard: true,
-              one_time_keyboard: true,
-            },
-          });
+          await this.showLocationPrompt(
+            ctx,
+            "📍 Please share your location to continue:"
+          );
         }
         break;
     }
   }
 
-  // ─── Lifecycle ───────────────────────────────────────────────────────────────
+  // ───────────────── Lifecycle ─────────────────
 
-  /** Start long-polling (dev / single-instance). */
   async startPolling(): Promise<void> {
-    logger.info("Starting Telegram bot (long-polling)…");
-    await this.bot.start({
-      onStart: (info) => console.log(`Bot @${info.username} is running`),
-    });
+    logger.info("Bot starting...");
+    await this.bot.start();
   }
 
-  /**
-   * Handle a single webhook update.
-   * Call this from your Express webhook route in production.
-   */
   async handleWebhookUpdate(update: unknown): Promise<void> {
     await this.bot.handleUpdate(update as any);
   }
 
-  /** Set the webhook URL (call once at deploy time). */
   async setWebhook(url: string): Promise<void> {
     await this.bot.api.setWebhook(url);
-    logger.info(`Telegram webhook set to ${url}`);
+    logger.info(`Webhook set: ${url}`);
   }
 
-  /** Remove webhook and go back to polling. */
   async deleteWebhook(): Promise<void> {
     await this.bot.api.deleteWebhook();
   }
@@ -180,11 +237,8 @@ export class TelegramBot implements IUserNotifier {
         parse_mode: "Markdown",
       });
     } catch (err) {
-      logger.error("Failed to send Telegram message", {
-        chatId,
-        error: err,
-      });
+      logger.error("Send message failed", { chatId, err });
     }
   }
-
 }
+

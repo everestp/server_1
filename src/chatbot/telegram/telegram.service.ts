@@ -5,8 +5,11 @@ import logger from "../../config/logger.config";
 import { NodeLatestRepository } from "../../repositories/nodeLatest.repository";
 import { TelegramPaymentRepository } from "../../repositories/telegram/telegramPayment.repository";
 import { TelegramUserRepository } from "../../repositories/telegram/telegramUser.repository";
+
 import { LLMService } from "../../service/llm.service";
+
 import { serverConfig } from "../../config";
+
 import { nanoid } from "nanoid";
 
 configDotenv();
@@ -14,7 +17,7 @@ configDotenv();
 const FREE_DAILY_LIMIT = 3;
 const PAYMENT_AMOUNT = 10;
 const PREMIUM_REQUESTS = 100;
-const NEARBY_RADIUS_KM = 50;
+const NEARBY_RADIUS_KM = 5000;
 
 export interface AskResult {
   type: "answer" | "payment_required" | "error";
@@ -32,34 +35,90 @@ export class TelegramService {
     private readonly telegramPaymentRepo: TelegramPaymentRepository
   ) {}
 
-  // ─── /start ─────────────────────────────────────────
+  // ───────────────── USER ─────────────────
+
+  private async getUser(telegramId: string) {
+    return this.telegramuserRepo.findByTelegramId(telegramId);
+  }
+
+  async hasLocation(telegramId: string) {
+    const user = await this.getUser(telegramId);
+    return !!user?.location?.lat;
+  }
+
+  // ───────────────── NODES ─────────────────
+
+  async getAvailableNodes(telegramId: string) {
+    const user = await this.getUser(telegramId);
+
+    if (!user?.location?.lat) return [];
+
+    return this.nodeRepo.findNearby(
+      user.location.lat,
+      user.location.lng,
+      NEARBY_RADIUS_KM
+    );
+  }
+
+  // ───────────────── START ─────────────────
+
   async handleStart(
     telegramId: string,
     username?: string
   ): Promise<{ text: string; askLocation: boolean }> {
-    let user = await this.telegramuserRepo.findByTelegramId(telegramId);
+    let user = await this.getUser(telegramId);
 
     if (!user) {
-      user = await this.telegramuserRepo.create({ telegramId, username });
-      logger.info(`New user registered: ${telegramId}`);
+      user = await this.telegramuserRepo.create({
+        telegramId,
+        username,
+      });
+
+      logger.info(`New telegram user: ${telegramId}`);
     }
 
     const askLocation = !user.location?.lat;
 
-    const text = askLocation
-      ? `🌬️ *BreezoNetwork*\n\nLive air quality, AQI & weather insights.\n\n📍 Share your location to start.`
-      : `🌬️ *Welcome back${username ? `, @${username}` : ""}!*\n\nAsk me anything about AQI.`;
+    return {
+      text: askLocation
+        ? `
+Breezo Network
 
-    return { text, askLocation };
+Real-time environmental monitoring assistant.
+
+Share your location to:
+• Find nearby sensors
+• Analyze AQI, CO₂, PM2.5
+• Get temperature & humidity insights
+• Receive health recommendations
+
+Use /help for commands.
+`.trim()
+        : `
+Welcome back${username ? ` @${username}` : ""}
+
+Use:
+/help - Commands
+/node - Nearby sensors
+/location - Update location
+`.trim(),
+
+      askLocation,
+    };
   }
 
-  // ─── Location ───────────────────────────────────────
+  // ───────────────── LOCATION ─────────────────
+
   async saveLocation(
     telegramId: string,
     lat: number,
     lng: number
   ): Promise<string> {
-    await this.telegramuserRepo.updateLocation(telegramId, lat, lng);
+    await this.telegramuserRepo.updateLocation(
+      telegramId,
+      lat,
+      lng
+    );
 
     const nearby = await this.nodeRepo.findNearby(
       lat,
@@ -67,145 +126,222 @@ export class TelegramService {
       NEARBY_RADIUS_KM
     );
 
-    return (
-      `✅ Location saved!\n\n` +
-      `Found ${nearby.length} nodes nearby.\n\n` +
-      `Now ask about air quality.`
-    );
+    return `
+Location updated successfully.
+
+Nearby active sensors: ${nearby.length}
+
+You can now:
+• Ask environmental questions
+• Use /node to view nearby sensors
+• Use /help for commands
+`.trim();
   }
 
-  // ─── Main handler ───────────────────────────────────
+  // ───────────────── MAIN AI ─────────────────
+
   async handleUserMessage(
     telegramId: string,
     userText: string
   ): Promise<AskResult> {
-    const user = await this.telegramuserRepo.findByTelegramId(telegramId);
 
+    const user = await this.getUser(telegramId);
+
+    // USER CHECK
     if (!user) {
       return {
         type: "error",
-        text: `⚠️ Please send /start first.`,
+        text: "Please send /start first.",
       };
     }
 
+    // LOCATION CHECK
     if (!user.location?.lat) {
       return {
         type: "answer",
-        text: `📍 Please share your location first.`,
+        text: "Please set your location using /location",
       };
     }
 
-    const usageOk = await this.checkAndConsumeUsage(user);
-    if (!usageOk) return this.buildPaymentResponse(telegramId);
+    // USAGE CHECK
+    const allowed = await this.checkUsage(user);
 
-    const { lat, lng } = user.location;
-    const nodes = await this.nodeRepo.findNearby(
-      lat,
-      lng,
+    if (!allowed) {
+      return this.buildPaymentResponse(telegramId);
+    }
+
+    // FETCH NODES
+    const nearbyNodes = await this.nodeRepo.findNearby(
+      user.location.lat,
+      user.location.lng,
       NEARBY_RADIUS_KM
     );
 
-    const prompt = this.buildPrompt(userText, lat, lng, nodes);
+    // NO NODE CASE
+    if (!nearbyNodes.length) {
+      return {
+        type: "answer",
+        text: "No nearby environmental sensors are currently available.",
+      };
+    }
+
+    // BUILD AI PROMPT
+    const prompt = this.buildPrompt(
+      userText,
+      user.location,
+      nearbyNodes.slice(0, 3)
+    );
 
     try {
       const answer = await this.llmService.ask(prompt);
-      return { type: "answer", text: answer };
+
+      return {
+        type: "answer",
+        text: answer,
+      };
+
     } catch (err) {
-      logger.error("LLM error", err);
+      logger.error("LLM Error", err);
+
       return {
         type: "error",
-        text: `⚠️ AI unavailable. Try again.`,
+        text: "Environmental AI service unavailable.",
       };
     }
   }
 
-  // ─── Usage ──────────────────────────────────────────
-  private async checkAndConsumeUsage(user: any): Promise<boolean> {
-    if (user.isPremium) {
-      if (user.remainingRequests <= 0) return false;
+  // ───────────────── USAGE ─────────────────
 
-      await this.telegramuserRepo.decrementRequests(user.telegramId);
+  private async checkUsage(user: any): Promise<boolean> {
+
+    // PREMIUM USER
+    if (user.isPremium) {
+
+      if (user.remainingRequests <= 0) {
+        return false;
+      }
+
+      await this.telegramuserRepo.decrementRequests(
+        user.telegramId
+      );
+
       return true;
     }
 
+    // FREE USER
     const today = new Date().toDateString();
-    const last = user.lastDailyReset
+
+    const lastReset = user.lastDailyReset
       ? new Date(user.lastDailyReset).toDateString()
       : null;
 
-    const count = last === today ? user.dailyUsage || 0 : 0;
+    const todayUsage =
+      lastReset === today
+        ? user.dailyUsage || 0
+        : 0;
 
-    if (count >= FREE_DAILY_LIMIT) return false;
+    // LIMIT REACHED
+    if (todayUsage >= FREE_DAILY_LIMIT) {
+      return false;
+    }
 
+    // INCREMENT DAILY USAGE
     await this.telegramuserRepo.incrementDailyUsage(
       user.telegramId,
-      last !== today
+      lastReset !== today
     );
 
     return true;
   }
 
-  // ─── 💳 Payment flow (FIXED) ─────────────────────────
-private async buildPaymentResponse(telegramId: string): Promise<AskResult> {
-  const treasury = serverConfig.SOLANA_TREASURY_WALLET!;
-  const mint = serverConfig.BREEZO_TOKEN_MINT!;
+  // ───────────────── PAYMENT ─────────────────
 
-  // ✅ only reuse non-expired pending payment
-  let payment = await this.telegramPaymentRepo.findPendingByUserId(telegramId);
+  private async buildPaymentResponse(
+    telegramId: string
+  ): Promise<AskResult> {
 
-  if (!payment) {
-    const paymentId = nanoid(10); // ✅ collision-safe
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // ✅ 15 min expiry
+    const treasury =
+      serverConfig.SOLANA_TREASURY_WALLET!;
 
-    payment = await this.telegramPaymentRepo.create({
+    const mint =
+      serverConfig.BREEZO_TOKEN_MINT!;
+
+    let payment =
+      await this.telegramPaymentRepo.findPendingByUserId(
+        telegramId
+      );
+
+    // CREATE NEW PAYMENT
+    if (!payment) {
+
+      const paymentId = nanoid(10);
+
+      payment =
+        await this.telegramPaymentRepo.create({
+          paymentId,
+          userId: telegramId,
+          amount: PAYMENT_AMOUNT,
+          memo: paymentId,
+          walletAddress: treasury,
+          tokenMint: mint,
+          expiresAt: new Date(
+            Date.now() + 15 * 60 * 1000
+          ),
+        });
+    }
+
+    const paymentId = payment.paymentId;
+
+    // SOLANA PAY URL
+    const solanaPayUrl =
+      `solana:${treasury}?amount=${PAYMENT_AMOUNT}` +
+      `&spl-token=${mint}` +
+      `&memo=${encodeURIComponent(paymentId)}`;
+
+    // QR
+    const qrBuffer =
+      await QRCode.toBuffer(solanaPayUrl, {
+        width: 320,
+      });
+
+    return {
+      type: "payment_required",
+
+      text: `
+Daily free limit reached.
+
+Upgrade to premium:
+• ${PREMIUM_REQUESTS} AI requests
+• Real-time environmental analysis
+• Multi-sensor insights
+
+Payment amount: ${PAYMENT_AMOUNT} tokens
+Expires in: 15 minutes
+
+Memo:
+${paymentId}
+`.trim(),
+
+      qrBuffer,
       paymentId,
-      userId: telegramId,
-      amount: PAYMENT_AMOUNT,
-      memo: paymentId,
       walletAddress: treasury,
-      tokenMint: mint,
-      expiresAt, // ✅
-    });
+    };
   }
 
-  const paymentId = payment.paymentId;
+  // ───────────────── AI PROMPT ─────────────────
 
-  const solanaPayUrl =
-    `solana:${treasury}?` +
-    `amount=${PAYMENT_AMOUNT}&` +
-    `spl-token=${mint}&` +
-    `memo=${encodeURIComponent(paymentId)}`;
+private buildPrompt(userText: string, location: any, nodes: any[]) {
+  // Use a compact string format for sensor data
+  const sensorContext = nodes.slice(0, 3).map((n, i) =>
+    `N${i+1}[ID:${n.nodeId ?? '?'}|AQI:${n.aqi ?? '?'}|Lvl:${n.aqiLevel ?? '?'}|PM2.5:${n.pm25 ?? '?'}|CO2:${n.pm10 ?? '?'}|T:${n.temperature ?? '?'}|H:${n.humidity ?? '?'}|Seen:${n.lastSeen ? new Date(n.lastSeen).toISOString() : '?'}]`
+  ).join("; ");
 
-  // ✅ throw on QR failure — don't send broken response
-  const qrBuffer = await QRCode.toBuffer(solanaPayUrl, { width: 320 });
-
-  return {
-    type: "payment_required",
-    text:
-      `🔒 Limit reached\n\n` +
-      `Unlock ${PREMIUM_REQUESTS} requests for ${PAYMENT_AMOUNT} tokens.\n\n` +
-      `Scan QR to pay.\n\n` +
-      `⏱ Expires in 15 minutes\n` + // ✅ inform user
-      `Memo: \`${paymentId}\``,
-    qrBuffer,
-    paymentId,
-    walletAddress: treasury,
-  };
+  return `Role: Breezo Environmental AI.
+Task: Analyze data & answer user question.
+Rules: Max 70 words. No emojis. Professional. Include values for AQI, Temp, Humidity, CO2, PM2.5. Note stale data/comfort/pollution.
+Location: ${location.lat},${location.lng}
+Data: ${sensorContext}
+Q: ${userText}
+Output: Professional advice + values.`;
 }
-
-
-  // ─── Helpers ────────────────────────────────────────
-  private buildPrompt(
-    userText: string,
-    lat: number,
-    lng: number,
-    nodes: any[]
-  ): string {
-    const context = nodes
-      .slice(0, 3)
-      .map((n, i) => `Node ${i + 1}: AQI=${n.aqi ?? "N/A"}`)
-      .join("\n");
-
-    return `Location: ${lat},${lng}\n${context}\n\nQ: ${userText}`;
-  }
 }
