@@ -24,7 +24,7 @@ const controller = new NodeController(service);
 /**
  * Create node
  */
-router.post("/create", isAuthenticated, controller.createNode);
+router.post("/create" ,controller.createNode);
 
 /**
  * Device ingestion (ESP32)
