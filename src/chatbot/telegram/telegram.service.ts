@@ -331,17 +331,29 @@ ${paymentId}
   // ───────────────── AI PROMPT ─────────────────
 
 private buildPrompt(userText: string, location: any, nodes: any[]) {
-  // Use a compact string format for sensor data
-  const sensorContext = nodes.slice(0, 3).map((n, i) =>
-    `N${i+1}[ID:${n.nodeId ?? '?'}|AQI:${n.aqi ?? '?'}|Lvl:${n.aqiLevel ?? '?'}|PM2.5:${n.pm25 ?? '?'}|CO2:${n.pm10 ?? '?'}|T:${n.temperature ?? '?'}|H:${n.humidity ?? '?'}|Seen:${n.lastSeen ? new Date(n.lastSeen).toISOString() : '?'}]`
-  ).join("; ");
+  const sensors = nodes.slice(0, 3).map((n, i) =>
+    `N${i+1}:AQI:${n.aqi ?? '?'},Lvl:${n.aqiLevel ?? '?'},PM2.5:${n.pm25 ?? '?'},T:${n.temperature ?? '?'}C,H:${n.humidity ?? '?'},Seen:${n.lastSeen ? new Date(n.lastSeen).toISOString() : '?'}`
+  ).join("\n");
 
-  return `Role: Breezo Environmental AI.
-Task: Analyze data & answer user question.
-Rules: Max 70 words. No emojis. Professional. Include values for AQI, Temp, Humidity, CO2, PM2.5. Note stale data/comfort/pollution.
-Location: ${location.lat},${location.lng}
-Data: ${sensorContext}
-Q: ${userText}
-Output: Professional advice + values.`;
+  return `Role: Breezo AI.
+Loc: ${location.lat},${location.lng}
+Sensors:
+${sensors}
+
+User: "${userText.trim()}"
+
+Response Logic:
+1. SOCIAL (Greetings, thanks, ok, bye):
+- Max 15 words. Friendly.
+- CRITICAL: IGNORE all sensor data. Do NOT mention AQI, air, or environment.
+
+2. ENVIRONMENTAL (Questions on safety, "can I go out", air, weather, health):
+- Max 70 words. Professional.
+- MUST use sensor data to advise on safety.
+- Mention AQI, PM2.5, Temp, Humidity.
+
+Strict Rules:
+- Plain text only. No markdown, no emojis.
+- Only return the final response text.`;
 }
 }
