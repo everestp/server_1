@@ -22,6 +22,7 @@ export class NodeMapService {
             pm10: node.pm10,
             humidity:node.humidity,
             reward: node.reward,
+            lastSeen:node.lastSeen
         }));
     }
  async getNearbyNodes(lat: number, lng: number, radius = 5000) {
