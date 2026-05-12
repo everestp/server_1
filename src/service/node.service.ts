@@ -95,7 +95,7 @@ export class NodeService {
   // =====================================================
   // INGEST SENSOR DATA (FIXED)
   // =====================================================
-  async ingestData(data: any) {
+async ingestData(data: any) {
     const { nodeId, payload } = data;
 
     if (!nodeId || !payload) throw new Error("Missing fields");
@@ -103,49 +103,53 @@ export class NodeService {
     const node = await this.nodeRepo.findByNodeId(nodeId);
     if (!node || !node.isLinked) throw new Error("Node not linked");
 
-    const reward = this.calculateReward(payload.pm25); // UI value
+    // 1. Calculate the reward for this specific ingestion
+    const currentIncentive = this.calculateReward(payload.pm25);
 
-    const nodeLatest = await this.nodeLatestRepo.upsertNodeLatest(
+    // 2. AWAIT the upsert so we get the ACTUAL updated document from DB
+    const updatedNodeLatest = await this.nodeLatestRepo.upsertNodeLatest(
       {
         nodeId,
         ownerEmail: node.ownerEmail,
         ...payload,
       },
-      reward
+      currentIncentive // This adds to the balance in DB
     );
 
-    // ✅ Emit for frontend (NO CHANGE NEEDED)
-    getIO().emit("node:update", {
-      nodeId,
-      reward,
-      ...payload,
-    });
-
+    // 3. EMIT the full updated object from the DB
+    // This ensures the UI gets the new total reward and the latest timestamps
+getIO().to("map").to("dashboard").emit("node:update", {
+  ...updatedNodeLatest.toObject(),
+  nodeId,
+  lat: payload.lat,
+  lng: payload.lng,
+  lastUpdate: new Date(),
+});
+    // 4. Background tasks (don't await these to keep ingestion fast)
     SensorHistory.create({
       nodeId,
       ownerEmail: node.ownerEmail,
       ...payload,
-    }).catch(console.error);
+    }).catch(err => logger.error("History Save Error:", err));
 
-    // 🚀 AUTO SYNC (10 BERZ threshold)
+    // 🚀 AUTO SYNC LOGIC
     if (
-      Number(nodeLatest.reward) >= 10 &&
-      !nodeLatest.syncing &&
+      Number(updatedNodeLatest.reward) >= 10 &&
+      !updatedNodeLatest.syncing &&
       node.nodeAccount
     ) {
       await this.nodeLatestRepo.markSyncing(nodeId);
-
-      const rewardBase = this.toBaseUnits(Number(nodeLatest.reward));
+      const rewardBase = this.toBaseUnits(Number(updatedNodeLatest.reward));
 
       this.syncToSolanaAsync(
         rewardBase,
-        nodeLatest.nodeId,
+        updatedNodeLatest.nodeId,
         node.ownerWallet!,
         node.nodeAccount
       );
     }
 
-    return nodeLatest;
+    return updatedNodeLatest;
   }
 
   // =====================================================
